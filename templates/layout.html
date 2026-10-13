@@ -1,0 +1,14 @@
+<!DOC TYPE html>
+<html>
+    <head>
+        {% if title %}
+        <title>FastAPI Blog {{ title }}</title>
+        {% else %}
+        <title>FastAPI Blog</title>
+        {% endif %}
+    </head>
+    <body>
+        {% block content %}
+        {% endblock content %}
+    </body>
+</html>
