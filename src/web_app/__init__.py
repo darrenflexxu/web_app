@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 from web_app import models
 from web_app.routers import posts, users
 
-from web_app.database import Base, engine, get_db
+from web_app.database import engine, get_db
 from typing import Annotated
 from contextlib import asynccontextmanager
 from fastapi.exception_handlers import (
@@ -20,8 +20,6 @@ from web_app.config import settings
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
     yield
     await engine.dispose()
 
@@ -35,6 +33,11 @@ templates = Jinja2Templates(directory="templates")
 
 app.include_router(users.router, prefix="/api/users", tags=["users"])
 app.include_router(posts.router, prefix="/api/posts", tags=["posts"])
+
+
+@app.get("/health", include_in_schema=False, name="health")
+async def health():
+    return {"status": "ok"}
 
 @app.get("/", include_in_schema=False, name="home")
 @app.get("/posts", include_in_schema=False, name="posts")
