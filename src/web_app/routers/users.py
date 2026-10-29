@@ -143,12 +143,16 @@ async def reset_password(request_data: ResetPasswordRequest, db: Annotated[Async
     reset_token = result.scalars().first()
     
     if not reset_token:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token")
     
-    if reset_token.expires_at.replace(tzinfo=UTC) < datetime.now(UTC):
+    if reset_token.expires_at < datetime.now(UTC):
         await db.delete(reset_token)
         await db.commit()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token")
     
     result = await db.execute(select(models.User).where(models.User.id == reset_token.user_id))
     user = result.scalars().first()
