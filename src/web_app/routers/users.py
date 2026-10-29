@@ -19,7 +19,11 @@ from PIL import UnidentifiedImageError
 
 from starlette.concurrency import run_in_threadpool
 
-from web_app.image_utils import delete_profile_image, process_profile_image
+from web_app.image_utils import (
+    ImageStorageError,
+    delete_profile_image,
+    process_profile_image,
+)
 
 from web_app import models
 from web_app.database import get_db
@@ -273,6 +277,8 @@ async def update_profile_picture(
         new_filename = await run_in_threadpool(process_profile_image, content)
     except UnidentifiedImageError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image file")
+    except ImageStorageError:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to store profile picture")
     old_filename = current_user.image_file
     current_user.image_file = new_filename
     await db.commit()

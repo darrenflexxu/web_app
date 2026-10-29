@@ -6,6 +6,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from web_app.database import Base
+from web_app.image_utils import profile_image_url
 
 
 class User(Base):
@@ -28,9 +29,7 @@ class User(Base):
 
     @property
     def image_path(self) -> str:
-        if self.image_file:
-            return f"/media/profile_pics/{self.image_file}"
-        return "/static/profile_pics/default.jpg"
+        return profile_image_url(self.image_file)
 
 
 

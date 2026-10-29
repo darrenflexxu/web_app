@@ -1,31 +1,162 @@
+import logging
 import uuid
+from functools import lru_cache
 from io import BytesIO
-from pathlib import Path
+
+import boto3
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 from PIL import Image, ImageOps
 
+from web_app.config import settings
 
-PROFILE_PICS_DIR = Path("media/profile_pics")
+
+logger = logging.getLogger(__name__)
+
+
+class ImageStorageError(Exception):
+    """Raised when the image storage backend fails."""
+
+
+@lru_cache(maxsize=4)
+def _create_s3_client(
+    key_id: str,
+    application_key: str,
+    endpoint_url: str,
+    region: str,
+):
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=key_id,
+        aws_secret_access_key=application_key,
+        region_name=region,
+        config=Config(
+            signature_version="s3v4",
+            retries={"max_attempts": 3, "mode": "standard"},
+        ),
+    )
+
+
+def _get_s3_client():
+    if not settings.b2_key_id or not settings.b2_application_key.get_secret_value():
+        raise ImageStorageError(
+            "Backblaze B2 is not configured: set B2_KEY_ID and B2_APPLICATION_KEY"
+        )
+    if not settings.b2_bucket or not settings.b2_endpoint_url:
+        raise ImageStorageError(
+            "Backblaze B2 is not configured: set B2_BUCKET and B2_ENDPOINT_URL"
+        )
+    if not settings.b2_region:
+        raise ImageStorageError(
+            "Backblaze B2 is not configured: set B2_REGION (e.g. us-west-004)"
+        )
+    if not settings.b2_private_bucket and not settings.b2_public_url:
+        raise ImageStorageError(
+            "Backblaze B2 is not configured: set B2_PUBLIC_URL, or set "
+            "B2_PRIVATE_BUCKET=true to use presigned URLs"
+        )
+
+    return _create_s3_client(
+        settings.b2_key_id,
+        settings.b2_application_key.get_secret_value(),
+        settings.b2_endpoint_url,
+        settings.b2_region,
+    )
+
+
+def _object_key(filename: str) -> str:
+    """Add the prefix to legacy filenames that were stored without it."""
+    if "/" in filename:
+        return filename
+    prefix = settings.b2_profile_pics_prefix.strip("/")
+    return f"{prefix}/{filename}" if prefix else filename
+
+
+def profile_image_url(filename: str | None) -> str:
+    """Return a URL for a profile picture.
+
+    Public buckets use B2_PUBLIC_URL directly. Private buckets use a
+    short-lived presigned GET URL.
+    """
+    if not filename:
+        return "/static/profile_pics/default.jpg"
+
+    key = _object_key(filename)
+
+    if not settings.b2_private_bucket:
+        base_url = settings.b2_public_url.rstrip("/")
+        if base_url:
+            return f"{base_url}/{key}"
+        return f"/media/{key}"
+
+    try:
+        url = _get_s3_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": settings.b2_bucket, "Key": key},
+            ExpiresIn=settings.b2_presigned_url_expires_seconds,
+        )
+    except (BotoCoreError, ClientError, ImageStorageError) as exc:
+        logger.warning("Failed to create presigned URL for %s: %s", key, exc)
+        return f"/media/{key}"
+
+    return url
 
 
 def process_profile_image(content: bytes, size=(300, 300)) -> str:
-    with Image.open(BytesIO(content)) as origial:
-        img = ImageOps.exif_transpose(origial)
+    """Resize an uploaded image and store it in B2. Returns the object key."""
+    with Image.open(BytesIO(content)) as original:
+        img = ImageOps.exif_transpose(original)
         img = ImageOps.fit(img, size, method=Image.Resampling.LANCZOS)
-        
+
         if img.mode in ("RGBA", "P", "LA"):
             img = img.convert("RGB")
-        filename = f"{uuid.uuid4()}.jpg"
-        filepath = PROFILE_PICS_DIR / filename
-        
-        PROFILE_PICS_DIR.mkdir(parents=True, exist_ok=True)
-        img.save(filepath, format="JPEG", quality=85, optimize=True)
-        
-    return filename
+
+        buffer = BytesIO()
+        img.save(buffer, format="JPEG", quality=85, optimize=True)
+
+    prefix = settings.b2_profile_pics_prefix.strip("/")
+    key = f"{prefix}/{uuid.uuid4()}.jpg" if prefix else f"{uuid.uuid4()}.jpg"
+
+    try:
+        _get_s3_client().put_object(
+            Bucket=settings.b2_bucket,
+            Key=key,
+            Body=buffer.getvalue(),
+            ContentType="image/jpeg",
+            # Private objects must not be cached by shared proxies.
+            CacheControl=(
+                f"private, max-age={settings.b2_presigned_url_expires_seconds}"
+                if settings.b2_private_bucket
+                else "public, max-age=31536000, immutable"
+            ),
+        )
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception(
+            "Failed to upload profile picture to B2 (bucket=%s, region=%s, key_id=%s)",
+            settings.b2_bucket,
+            settings.b2_region,
+            settings.b2_key_id,
+        )
+        raise ImageStorageError("Failed to upload profile picture to B2") from exc
+
+    return key
 
 
 def delete_profile_image(filename: str | None) -> None:
-    if filename is None:
+    """Delete a profile picture object from B2. No-op for empty values."""
+    if not filename:
         return
-    filepath = PROFILE_PICS_DIR / filename
-    if filepath.exists():
-        filepath.unlink()
+
+    try:
+        _get_s3_client().delete_object(
+            Bucket=settings.b2_bucket,
+            Key=_object_key(filename),
+        )
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception(
+            "Failed to delete profile picture from B2 (bucket=%s, key=%s)",
+            settings.b2_bucket,
+            filename,
+        )
+        raise ImageStorageError("Failed to delete profile picture from B2") from exc

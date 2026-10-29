@@ -26,5 +26,18 @@ class Settings(BaseSettings):
     
     frontend_url: str = "http://localhost:8000"
 
+    # Backblaze B2 (S3-compatible API)
+    b2_key_id: str = ""
+    b2_application_key: SecretStr = SecretStr("")
+    b2_bucket: str = ""
+    b2_region: str = ""  # e.g. us-west-004
+    b2_endpoint_url: str = ""  # e.g. https://s3.us-west-004.backblazeb2.com
+    # Public bucket URL, e.g. https://f004.backblazeb2.com/file/<bucket>
+    b2_public_url: str = ""
+    b2_profile_pics_prefix: str = "profile_pics"
+    # Private bucket: serve images via short-lived presigned URLs.
+    b2_private_bucket: bool = False
+    b2_presigned_url_expires_seconds: int = 3600
+
 
 settings = Settings()
