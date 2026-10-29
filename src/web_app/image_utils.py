@@ -13,6 +13,8 @@ from web_app.config import settings
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_PROFILE_PIC_LOCAL = "/static/profile_pics/default.jpg"
+
 
 class ImageStorageError(Exception):
     """Raised when the image storage backend fails."""
@@ -73,34 +75,65 @@ def _object_key(filename: str) -> str:
     return f"{prefix}/{filename}" if prefix else filename
 
 
+def _default_profile_pic_key() -> str:
+    prefix = settings.b2_profile_pics_prefix.strip("/")
+    return f"{prefix}/default.jpg" if prefix else "default.jpg"
+
+
+def _resolve_url(key: str) -> str | None:
+    if not settings.b2_private_bucket:
+        base_url = settings.b2_public_url.rstrip("/")
+        return f"{base_url}/{key}" if base_url else None
+
+    return _get_s3_client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": settings.b2_bucket, "Key": key},
+        ExpiresIn=settings.b2_presigned_url_expires_seconds,
+    )
+
+
 def profile_image_url(filename: str | None) -> str:
     """Return a URL for a profile picture.
 
     Public buckets use B2_PUBLIC_URL directly. Private buckets use a
-    short-lived presigned GET URL.
+    short-lived presigned GET URL. Falls back to the bundled default image
+    when no picture is set or B2 is unavailable.
     """
-    if not filename:
-        return "/static/profile_pics/default.jpg"
-
-    key = _object_key(filename)
-
-    if not settings.b2_private_bucket:
-        base_url = settings.b2_public_url.rstrip("/")
-        if base_url:
-            return f"{base_url}/{key}"
-        return f"/media/{key}"
+    key = _object_key(filename) if filename else _default_profile_pic_key()
 
     try:
-        url = _get_s3_client().generate_presigned_url(
-            "get_object",
-            Params={"Bucket": settings.b2_bucket, "Key": key},
-            ExpiresIn=settings.b2_presigned_url_expires_seconds,
-        )
+        url = _resolve_url(key)
     except (BotoCoreError, ClientError, ImageStorageError) as exc:
-        logger.warning("Failed to create presigned URL for %s: %s", key, exc)
-        return f"/media/{key}"
+        logger.warning("Failed to create URL for %s: %s", key, exc)
+        url = None
 
-    return url
+    if url:
+        return url
+    return f"/media/{key}" if filename else DEFAULT_PROFILE_PIC_LOCAL
+
+
+def _put_object(key: str, body: bytes) -> None:
+    try:
+        _get_s3_client().put_object(
+            Bucket=settings.b2_bucket,
+            Key=key,
+            Body=body,
+            ContentType="image/jpeg",
+            # Private objects must not be cached by shared proxies.
+            CacheControl=(
+                f"private, max-age={settings.b2_presigned_url_expires_seconds}"
+                if settings.b2_private_bucket
+                else "public, max-age=31536000, immutable"
+            ),
+        )
+    except (BotoCoreError, ClientError) as exc:
+        logger.exception(
+            "Failed to upload image to B2 (bucket=%s, region=%s, key=%s)",
+            settings.b2_bucket,
+            settings.b2_region,
+            key,
+        )
+        raise ImageStorageError("Failed to upload image to B2") from exc
 
 
 def process_profile_image(content: bytes, size=(300, 300)) -> str:
@@ -118,28 +151,15 @@ def process_profile_image(content: bytes, size=(300, 300)) -> str:
     prefix = settings.b2_profile_pics_prefix.strip("/")
     key = f"{prefix}/{uuid.uuid4()}.jpg" if prefix else f"{uuid.uuid4()}.jpg"
 
-    try:
-        _get_s3_client().put_object(
-            Bucket=settings.b2_bucket,
-            Key=key,
-            Body=buffer.getvalue(),
-            ContentType="image/jpeg",
-            # Private objects must not be cached by shared proxies.
-            CacheControl=(
-                f"private, max-age={settings.b2_presigned_url_expires_seconds}"
-                if settings.b2_private_bucket
-                else "public, max-age=31536000, immutable"
-            ),
-        )
-    except (BotoCoreError, ClientError) as exc:
-        logger.exception(
-            "Failed to upload profile picture to B2 (bucket=%s, region=%s, key_id=%s)",
-            settings.b2_bucket,
-            settings.b2_region,
-            settings.b2_key_id,
-        )
-        raise ImageStorageError("Failed to upload profile picture to B2") from exc
+    _put_object(key, buffer.getvalue())
 
+    return key
+
+
+def upload_default_profile_image(content: bytes) -> str:
+    """Upload the bundled default profile picture to B2. Returns the key."""
+    key = _default_profile_pic_key()
+    _put_object(key, content)
     return key
 
 
